@@ -258,13 +258,19 @@ if master_df is not None:
                 save_settings(st.session_state['settings'])
                 st.success("条件を保存しました！次回起動時もこの条件がセットされます。")
             
+            # 💡 比較を行う前に、比較対象の列を確実に数値型に変換する
+            for col in ['ROE(自己資本利益率)(%)', 'PER(株価収益率)(倍)', 'PBR(株価純資産倍率)(倍)', '配当利回り(%)', '過去3年平均売上高成長率(予)(%)', '自己資本比率(%)']:
+            if col in latest_df.columns:
+            latest_df[col] = pd.to_numeric(latest_df[col], errors='coerce')
+
+            # その上で、これまで通りの絞り込みを行う
             filtered_df = latest_df[
                 (latest_df['ROE(自己資本利益率)(%)'].fillna(0) >= current_roe) &
                 (latest_df['PER(株価収益率)(倍)'].fillna(100) <= current_per) &
                 (latest_df['PBR(株価純資産倍率)(倍)'].fillna(10) <= current_pbr) &
                 (latest_df['配当利回り(%)'].fillna(0) >= current_div)
             ]
-            
+
             if '過去3年平均売上高成長率(予)(%)' in latest_df.columns:
                 filtered_df = filtered_df[filtered_df['過去3年平均売上高成長率(予)(%)'].fillna(-100) >= current_growth]
             if '自己資本比率(%)' in latest_df.columns:

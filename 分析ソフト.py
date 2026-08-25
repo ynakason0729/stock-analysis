@@ -172,6 +172,43 @@ if master_df is not None:
                 else:
                     d_col2.markdown(f"**{col_name}**: {formatted_val}")
             
+            # 🌟 順番を入れ替え、CSVの推移グラフを上に配置
+            st.divider()
+            st.write(f"**【CSVデータ】{stock_info_latest['銘柄名']} のファンダメンタル指標推移**")
+            
+            stock_history_df = master_df[master_df['コード'].astype(str) == selected_code].sort_values('取得日')
+            
+            if len(stock_history_df) > 1 and '取得日' in stock_history_df.columns:
+                # 🌟 型推論（numeric_cols）に依存せず、文字情報以外のすべての列を候補にする
+                exclude_from_plot = ['取得日', 'コード', '銘柄名', '市場', '財務', '検索用ラベル', '前日比(%)', '前日比(%) (数値)', '現在値']
+                plot_cols = [c for c in master_df.columns if c not in exclude_from_plot]
+                
+                default_idx = plot_cols.index('ROE(自己資本利益率)(%)') if 'ROE(自己資本利益率)(%)' in plot_cols else 0
+                
+                selected_metric = st.selectbox("推移を確認したい指標を選択してください:", plot_cols, index=default_idx)
+                
+                if selected_metric:
+                    # グラフ描画前に、強制的にカンマ等を取り除いて数値データに変換
+                    plot_data = stock_history_df.copy()
+                    plot_data[selected_metric] = pd.to_numeric(plot_data[selected_metric].astype(str).str.replace(',', '', regex=True), errors='coerce')
+                    plot_data = plot_data.dropna(subset=[selected_metric])
+
+                    if len(plot_data) > 0:
+                        fig_metric = px.line(
+                            plot_data, 
+                            x='取得日', 
+                            y=selected_metric, 
+                            markers=True,
+                            title=f"{stock_info_latest['銘柄名']} の {selected_metric} の推移"
+                        )
+                        fig_metric.update_layout(height=400, margin=dict(l=0, r=0, t=40, b=0))
+                        st.plotly_chart(fig_metric, use_container_width=True)
+                    else:
+                        st.warning("この指標は有効な数値データとしてグラフ化できませんでした。")
+            else:
+                st.info("※この銘柄の過去の記録（複数日分のデータ）がマスターCSV内に存在しないため、推移グラフは表示されません。日々データを追記していくことでグラフ化されるようになります。")
+
+
             st.divider()
             
             st.write(f"**【自動取得】過去1年間の株価推移 ＆ ボリンジャーバンド(±2σ)**")
@@ -198,32 +235,6 @@ if master_df is not None:
                         st.plotly_chart(fig, use_container_width=True)
                 except Exception as e:
                     st.error("チャート取得失敗")
-
-            # 🌟 今回追加・修正したCSVの推移グラフ部分
-            st.divider()
-            st.write(f"**【CSVデータ】{stock_info_latest['銘柄名']} のファンダメンタル指標推移**")
-            
-            stock_history_df = master_df[master_df['コード'].astype(str) == selected_code].sort_values('取得日')
-            
-            if len(stock_history_df) > 1 and '取得日' in stock_history_df.columns:
-                plot_cols = [c for c in numeric_cols if c not in ['コード', '現在値', '前日比(%) (数値)']]
-                default_idx = plot_cols.index('ROE(自己資本利益率)(%)') if 'ROE(自己資本利益率)(%)' in plot_cols else 0
-                
-                selected_metric = st.selectbox("推移を確認したい指標を選択してください:", plot_cols, index=default_idx)
-                
-                if selected_metric:
-                    fig_metric = px.line(
-                        stock_history_df.dropna(subset=[selected_metric]), 
-                        x='取得日', 
-                        y=selected_metric, 
-                        markers=True,
-                        title=f"{stock_info_latest['銘柄名']} の {selected_metric} の推移"
-                    )
-                    fig_metric.update_layout(height=400, margin=dict(l=0, r=0, t=40, b=0))
-                    st.plotly_chart(fig_metric, use_container_width=True)
-            else:
-                st.info("※この銘柄の過去の記録（複数日分のデータ）がマスターCSV内に存在しないため、推移グラフは表示されません。日々データを追記していくことでグラフ化されるようになります。")
-
 
     # --- モード2: スクリーニング ＆ お気に入り ---
     elif mode == "⭐ スクリーニング ＆ お気に入り":

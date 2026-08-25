@@ -77,7 +77,7 @@ def load_and_clean_master_data(filepath="master_database.csv"):
                 cleaned = df[col].astype(str).str.strip().str.replace(',', '', regex=True)
                 df[col] = pd.to_numeric(cleaned, errors='coerce')
     
-    # 🌟【修正】取得日の時間を消して「YYYY-MM-DD」形式のみにする
+    # 取得日の時間を消して「YYYY-MM-DD」形式のみにする
     if '取得日' in df.columns:
         df['取得日'] = pd.to_datetime(df['取得日'], errors='coerce').dt.strftime('%Y-%m-%d')
 
@@ -199,6 +199,32 @@ if master_df is not None:
                 except Exception as e:
                     st.error("チャート取得失敗")
 
+            # 🌟 今回追加・修正したCSVの推移グラフ部分
+            st.divider()
+            st.write(f"**【CSVデータ】{stock_info_latest['銘柄名']} のファンダメンタル指標推移**")
+            
+            stock_history_df = master_df[master_df['コード'].astype(str) == selected_code].sort_values('取得日')
+            
+            if len(stock_history_df) > 1 and '取得日' in stock_history_df.columns:
+                plot_cols = [c for c in numeric_cols if c not in ['コード', '現在値', '前日比(%) (数値)']]
+                default_idx = plot_cols.index('ROE(自己資本利益率)(%)') if 'ROE(自己資本利益率)(%)' in plot_cols else 0
+                
+                selected_metric = st.selectbox("推移を確認したい指標を選択してください:", plot_cols, index=default_idx)
+                
+                if selected_metric:
+                    fig_metric = px.line(
+                        stock_history_df.dropna(subset=[selected_metric]), 
+                        x='取得日', 
+                        y=selected_metric, 
+                        markers=True,
+                        title=f"{stock_info_latest['銘柄名']} の {selected_metric} の推移"
+                    )
+                    fig_metric.update_layout(height=400, margin=dict(l=0, r=0, t=40, b=0))
+                    st.plotly_chart(fig_metric, use_container_width=True)
+            else:
+                st.info("※この銘柄の過去の記録（複数日分のデータ）がマスターCSV内に存在しないため、推移グラフは表示されません。日々データを追記していくことでグラフ化されるようになります。")
+
+
     # --- モード2: スクリーニング ＆ お気に入り ---
     elif mode == "⭐ スクリーニング ＆ お気に入り":
         tab1, tab2 = st.tabs(["🎯 条件スクリーニング", "⭐ お気に入りリスト"])
@@ -258,12 +284,10 @@ if master_df is not None:
                 save_settings(st.session_state['settings'])
                 st.success("条件を保存しました！次回起動時もこの条件がセットされます。")
             
-            # 💡 比較を行う前に、比較対象の列を確実に数値型に変換する
             for col in ['ROE(自己資本利益率)(%)', 'PER(株価収益率)(倍)', 'PBR(株価純資産倍率)(倍)', '配当利回り(%)', '過去3年平均売上高成長率(予)(%)', '自己資本比率(%)']:
                 if col in latest_df.columns:
                     latest_df[col] = pd.to_numeric(latest_df[col], errors='coerce')
 
-            # その上で、これまで通りの絞り込みを行う
             filtered_df = latest_df[
                 (latest_df['ROE(自己資本利益率)(%)'].fillna(0) >= current_roe) &
                 (latest_df['PER(株価収益率)(倍)'].fillna(100) <= current_per) &

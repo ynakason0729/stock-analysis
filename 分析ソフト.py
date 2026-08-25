@@ -7,6 +7,7 @@ from sklearn.ensemble import RandomForestRegressor
 import yfinance as yf
 import os
 import json
+from datetime import datetime, timedelta
 
 st.set_page_config(page_title="ハイブリッド株式スクリーナー", layout="wide")
 st.title("ハイブリッド株式スクリーナー ＆ ファクター分析")
@@ -23,7 +24,8 @@ def load_settings():
     return {
         "favorites": ["4661"], 
         "scr_roe": 0.0, "scr_per": 100.0, "scr_div": 0.0,
-        "scr_pbr": 10.0, "scr_growth": -50.0, "scr_equity": 0.0
+        "scr_pbr": 10.0, "scr_growth": -50.0, "scr_equity": 0.0, 
+        "scr_eps_growing": False, "scr_eps_mode": "厳格な連続増益（一切の下落なし）"
     }
 
 def save_settings(settings):
@@ -39,6 +41,8 @@ if 'settings' not in st.session_state:
     st.session_state['scr_pbr'] = st.session_state['settings'].get("scr_pbr", 10.0)
     st.session_state['scr_growth'] = st.session_state['settings'].get("scr_growth", -50.0)
     st.session_state['scr_equity'] = st.session_state['settings'].get("scr_equity", 0.0)
+    st.session_state['scr_eps_growing'] = st.session_state['settings'].get("scr_eps_growing", False)
+    st.session_state['scr_eps_mode'] = st.session_state['settings'].get("scr_eps_mode", "厳格な連続増益（一切の下落なし）")
 
 def add_favorite(code):
     if code not in st.session_state['favorites']:
@@ -77,7 +81,6 @@ def load_and_clean_master_data(filepath="master_database.csv"):
                 cleaned = df[col].astype(str).str.strip().str.replace(',', '', regex=True)
                 df[col] = pd.to_numeric(cleaned, errors='coerce')
     
-    # 取得日の時間を消して「YYYY-MM-DD」形式のみにする
     if '取得日' in df.columns:
         df['取得日'] = pd.to_datetime(df['取得日'], errors='coerce').dt.strftime('%Y-%m-%d')
 
@@ -172,45 +175,31 @@ if master_df is not None:
                 else:
                     d_col2.markdown(f"**{col_name}**: {formatted_val}")
             
-            # 🌟 順番を入れ替え、CSVの推移グラフを上に配置
             st.divider()
             st.write(f"**【CSVデータ】{stock_info_latest['銘柄名']} のファンダメンタル指標推移**")
             
             stock_history_df = master_df[master_df['コード'].astype(str) == selected_code].sort_values('取得日')
             
             if len(stock_history_df) > 1 and '取得日' in stock_history_df.columns:
-                # 🌟 型推論（numeric_cols）に依存せず、文字情報以外のすべての列を候補にする
                 exclude_from_plot = ['取得日', 'コード', '銘柄名', '市場', '財務', '検索用ラベル', '前日比(%)', '前日比(%) (数値)', '現在値']
                 plot_cols = [c for c in master_df.columns if c not in exclude_from_plot]
-                
                 default_idx = plot_cols.index('ROE(自己資本利益率)(%)') if 'ROE(自己資本利益率)(%)' in plot_cols else 0
                 
                 selected_metric = st.selectbox("推移を確認したい指標を選択してください:", plot_cols, index=default_idx)
                 
                 if selected_metric:
-                    # グラフ描画前に、強制的にカンマ等を取り除いて数値データに変換
                     plot_data = stock_history_df.copy()
                     plot_data[selected_metric] = pd.to_numeric(plot_data[selected_metric].astype(str).str.replace(',', '', regex=True), errors='coerce')
                     plot_data = plot_data.dropna(subset=[selected_metric])
 
                     if len(plot_data) > 0:
-                        fig_metric = px.line(
-                            plot_data, 
-                            x='取得日', 
-                            y=selected_metric, 
-                            markers=True,
-                            title=f"{stock_info_latest['銘柄名']} の {selected_metric} の推移"
-                        )
+                        fig_metric = px.line(plot_data, x='取得日', y=selected_metric, markers=True, title=f"{stock_info_latest['銘柄名']} の {selected_metric} の推移")
                         fig_metric.update_layout(height=400, margin=dict(l=0, r=0, t=40, b=0))
                         st.plotly_chart(fig_metric, use_container_width=True)
-                    else:
-                        st.warning("この指標は有効な数値データとしてグラフ化できませんでした。")
             else:
-                st.info("※この銘柄の過去の記録（複数日分のデータ）がマスターCSV内に存在しないため、推移グラフは表示されません。日々データを追記していくことでグラフ化されるようになります。")
-
+                st.info("※この銘柄の過去の記録（複数日分のデータ）がマスターCSV内に存在しないため、推移グラフは表示されません。")
 
             st.divider()
-            
             st.write(f"**【自動取得】過去1年間の株価推移 ＆ ボリンジャーバンド(±2σ)**")
             with st.spinner("株価の推移データを取得中..."):
                 try:
@@ -226,11 +215,9 @@ if master_df is not None:
                             x=history.index, open=history['Open'], high=history['High'],
                             low=history['Low'], close=history['Close'], name="株価"
                         )])
-                        
-                        fig.add_trace(go.Scatter(x=history.index, y=history['Upper2'], mode='lines', name='+2σ (買われすぎ目安)', line=dict(color='rgba(200, 200, 200, 0.5)', width=1, dash='dash')))
-                        fig.add_trace(go.Scatter(x=history.index, y=history['Lower2'], mode='lines', name='-2σ (売られすぎ目安)', line=dict(color='rgba(200, 200, 200, 0.5)', width=1, dash='dash'), fill='tonexty', fillcolor='rgba(200, 200, 200, 0.1)'))
+                        fig.add_trace(go.Scatter(x=history.index, y=history['Upper2'], mode='lines', name='+2σ', line=dict(color='rgba(200, 200, 200, 0.5)', width=1, dash='dash')))
+                        fig.add_trace(go.Scatter(x=history.index, y=history['Lower2'], mode='lines', name='-2σ', line=dict(color='rgba(200, 200, 200, 0.5)', width=1, dash='dash'), fill='tonexty', fillcolor='rgba(200, 200, 200, 0.1)'))
                         fig.add_trace(go.Scatter(x=history.index, y=history['MA25'], mode='lines', name='25日移動平均', line=dict(color='blue', width=1.5)))
-                        
                         fig.update_layout(height=500, margin=dict(l=0, r=0, t=30, b=0), xaxis_rangeslider_visible=False)
                         st.plotly_chart(fig, use_container_width=True)
                 except Exception as e:
@@ -242,10 +229,7 @@ if master_df is not None:
         
         with tab1:
             st.subheader("条件を設定して銘柄を絞り込む")
-            
-            st.write("▼ プリセット条件で一発セット")
             col_p1, col_p2, col_p3 = st.columns(3)
-            
             if col_p1.button("📈 成長＆安全性重視（画像1）"):
                 st.session_state['scr_roe'] = 10.0
                 st.session_state['scr_growth'] = 10.0
@@ -253,7 +237,7 @@ if master_df is not None:
                 st.session_state['scr_per'] = 100.0
                 st.session_state['scr_pbr'] = 10.0
                 st.session_state['scr_div'] = 0.0
-                
+                st.session_state['scr_eps_growing'] = False
             if col_p2.button("💎 厳格バリュー基準（画像2）"):
                 st.session_state['scr_roe'] = 10.0
                 st.session_state['scr_per'] = 15.0
@@ -261,7 +245,7 @@ if master_df is not None:
                 st.session_state['scr_growth'] = -50.0
                 st.session_state['scr_equity'] = 0.0
                 st.session_state['scr_div'] = 0.0
-                
+                st.session_state['scr_eps_growing'] = False
             if col_p3.button("🔄 すべてリセット"):
                 st.session_state['scr_roe'] = 0.0
                 st.session_state['scr_per'] = 100.0
@@ -269,11 +253,10 @@ if master_df is not None:
                 st.session_state['scr_growth'] = -50.0
                 st.session_state['scr_equity'] = 0.0
                 st.session_state['scr_div'] = 0.0
+                st.session_state['scr_eps_growing'] = False
+                st.session_state['scr_eps_mode'] = "厳格な連続増益（一切の下落なし）"
 
             st.divider()
-
-            st.write("▼ 個別条件の微調整（スライダーを動かすか、右側の枠に直接数値を入力できます）")
-            
             def dual_input(label, key, min_val, max_val):
                 col_slider, col_num = st.columns([3, 1])
                 with col_slider:
@@ -290,10 +273,25 @@ if master_df is not None:
             current_growth = dual_input("3年平均売上成長率の最低ライン (%)", 'scr_growth', -50.0, 50.0)
             current_equity = dual_input("自己資本比率の最低ライン (%)", 'scr_equity', 0.0, 100.0)
             
-            st.write("")
+            # 🌟 成長株チェック ＆ 判定モードの選択
+            eps_growing_check = st.checkbox("📈 過去データにおいてEPSが右肩上がりに成長している銘柄を抽出する", value=st.session_state.get('scr_eps_growing', False))
+            st.session_state['scr_eps_growing'] = eps_growing_check
+
+            if eps_growing_check:
+                eps_mode = st.selectbox(
+                    "EPS成長の判定ルールを選択してください:",
+                    [
+                        "厳格な連続増益（一切の下落なし）",
+                        "全体トレンド重視（最初の記録と最新を比較してプラス）",
+                        "例外許容モード（途中の下落は最大1回まで許容）"
+                    ],
+                    index=["厳格な連続増益（一切の下落なし）", "全体トレンド重視（最初の記録と最新を比較してプラス）", "例外許容モード（途中の下落は最大1回まで許容）"].index(st.session_state.get('scr_eps_mode', "厳格な連続増益（一切の下落なし）"))
+                )
+                st.session_state['scr_eps_mode'] = eps_mode
+
             if st.button("💾 現在の条件をデフォルトとして保存"):
                 save_settings(st.session_state['settings'])
-                st.success("条件を保存しました！次回起動時もこの条件がセットされます。")
+                st.success("条件を保存しました！")
             
             for col in ['ROE(自己資本利益率)(%)', 'PER(株価収益率)(倍)', 'PBR(株価純資産倍率)(倍)', '配当利回り(%)', '過去3年平均売上高成長率(予)(%)', '自己資本比率(%)']:
                 if col in latest_df.columns:
@@ -310,47 +308,59 @@ if master_df is not None:
                 filtered_df = filtered_df[filtered_df['過去3年平均売上高成長率(予)(%)'].fillna(-100) >= current_growth]
             if '自己資本比率(%)' in latest_df.columns:
                 filtered_df = filtered_df[filtered_df['自己資本比率(%)'].fillna(0) >= current_equity]
+
+            # 🌟 EPS成長の判定ロジック（選択されたモードに分岐）
+            eps_col_candidates = [c for c in master_df.columns if "EPS" in c]
+            eps_col = eps_col_candidates[0] if eps_col_candidates else None
+
+            if eps_growing_check and eps_col and '取得日' in master_df.columns:
+                valid_codes = []
+                for code, group in master_df.groupby('コード'):
+                    g_sorted = group.sort_values('取得日')
+                    eps_series = pd.to_numeric(g_sorted[eps_col].astype(str).str.replace(',', '', regex=True), errors='coerce').dropna()
+                    
+                    if len(eps_series) >= 2:
+                        vals = eps_series.values
+                        if st.session_state['scr_eps_mode'] == "厳格な連続増益（一切の下落なし）":
+                            if eps_series.is_monotonic_increasing:
+                                valid_codes.append(code)
+                        elif st.session_state['scr_eps_mode'] == "全体トレンド重視（最初の記録と最新を比較してプラス）":
+                            if vals[-1] > vals[0]:
+                                valid_codes.append(code)
+                        elif st.session_state['scr_eps_mode'] == "例外許容モード（途中の下落は最大1回まで許容）":
+                            # 下落した回数（前回より下がったポイントの数）をカウント
+                            decreases = sum(1 for i in range(1, len(vals)) if vals[i] < vals[i-1])
+                            if decreases <= 1 and vals[-1] > vals[0]:
+                                valid_codes.append(code)
+
+                filtered_df = filtered_df[filtered_df['コード'].isin(valid_codes)]
             
             st.success(f"条件に合致する銘柄: {len(filtered_df)}件")
-            
-            if len(filtered_df) > 0 and st.button("🚀 絞り込んだ銘柄の最新株価を一括取得"):
-                with st.spinner(f"{len(filtered_df)}件の株価を取得中..."):
-                    tickers = [get_ticker_symbol(code) for code in filtered_df['コード'].unique()]
-                    try:
-                        data = yf.download(tickers, period="1d", group_by="ticker", threads=False)
-                        current_prices = {}
-                        for ticker in tickers:
-                            try:
-                                if len(tickers) == 1: current_prices[ticker] = data['Close'].iloc[-1]
-                                else: current_prices[ticker] = data[ticker]['Close'].iloc[-1]
-                            except: pass
-                        filtered_df['最新株価'] = filtered_df['コード'].apply(lambda x: current_prices.get(get_ticker_symbol(x)))
-                        
-                        display_cols = ['コード', '銘柄名', 'ROE(自己資本利益率)(%)', 'PER(株価収益率)(倍)', 'PBR(株価純資産倍率)(倍)']
-                        if '過去3年平均売上高成長率(予)(%)' in filtered_df.columns: display_cols.append('過去3年平均売上高成長率(予)(%)')
-                        if '自己資本比率(%)' in filtered_df.columns: display_cols.append('自己資本比率(%)')
-                        display_cols.append('最新株価')
-                        st.dataframe(filtered_df[display_cols])
-                    except:
-                        st.error("取得失敗")
-            else:
-                display_cols = ['コード', '銘柄名', 'ROE(自己資本利益率)(%)', 'PER(株価収益率)(倍)', 'PBR(株価純資産倍率)(倍)']
-                if '過去3年平均売上高成長率(予)(%)' in filtered_df.columns: display_cols.append('過去3年平均売上高成長率(予)(%)')
-                if '自己資本比率(%)' in filtered_df.columns: display_cols.append('自己資本比率(%)')
-                display_cols.append('現在値')
-                st.dataframe(filtered_df[display_cols])
+
+            display_cols = ['コード', '銘柄名', 'ROE(自己資本利益率)(%)', 'PER(株価収益率)(倍)', 'PBR(株価純資産倍率)(倍)']
+            if '過去3年平均売上高成長率(予)(%)' in latest_df.columns: display_cols.append('過去3年平均売上高成長率(予)(%)')
+            if '自己資本比率(%)' in latest_df.columns: display_cols.append('自己資本比率(%)')
+            display_cols.append('現在値' if '現在値' in latest_df.columns else '株価(CSV時点)')
+
+            if len(filtered_df) > 0:
+                csv_data = filtered_df[display_cols].to_csv(index=False).encode('cp932', errors='ignore')
+                st.download_button(
+                    label="📥 絞り込んだ銘柄リストをCSVでダウンロード",
+                    data=csv_data,
+                    file_name="screening_result.csv",
+                    mime="text/csv"
+                )
+
+            st.dataframe(filtered_df[display_cols])
 
         with tab2:
             st.subheader("お気に入り銘柄の動向チェック")
             fav_codes = st.session_state['favorites']
-            
             if not fav_codes:
-                st.info("お気に入りに登録されている銘柄はありません。「個別銘柄の検索」から追加してください。")
+                st.info("お気に入りに登録されている銘柄はありません。")
             else:
                 fav_df = latest_df[latest_df['コード'].astype(str).isin(fav_codes)].copy()
-                
                 hidden_cols = ['検索用ラベル', '前日比(%) (数値)']
-                
                 if st.button("🚀 お気に入り銘柄の最新株価を取得"):
                     with st.spinner("取得中..."):
                         tickers = [get_ticker_symbol(code) for code in fav_df['コード'].unique()]
@@ -363,32 +373,23 @@ if master_df is not None:
                                     else: current_prices[ticker] = data[ticker]['Close'].iloc[-1]
                                 except: pass
                             fav_df['最新株価(Yahoo)'] = fav_df['コード'].apply(lambda x: current_prices.get(get_ticker_symbol(x)))
-                            
                             past_price_col = '現在値' if '現在値' in fav_df.columns else '当時の株価'
                             if past_price_col in fav_df.columns:
                                 fav_df['変動率(%)'] = (fav_df['最新株価(Yahoo)'] - fav_df[past_price_col]) / fav_df[past_price_col] * 100
-                                
                             front_cols = ['取得日', 'コード', '銘柄名', past_price_col, '最新株価(Yahoo)', '変動率(%)']
                             other_cols = [c for c in fav_df.columns if c not in front_cols and c not in hidden_cols]
-                            
                             st.dataframe(fav_df[front_cols + other_cols])
                         except:
                             st.error("取得失敗")
                 else:
                     front_cols = ['取得日', 'コード', '銘柄名', '現在値'] if '現在値' in fav_df.columns else ['取得日', 'コード', '銘柄名']
                     other_cols = [c for c in fav_df.columns if c not in front_cols and c not in hidden_cols]
-                    
                     st.dataframe(fav_df[front_cols + other_cols])
 
     # --- モード3: 現在の要因分析 ---
     elif mode == "📈 現在の要因分析 (多変量解析)":
         st.subheader("現在のデータに潜む要因の分析")
-        
-        target_mode = st.radio(
-            "分析のアプローチ（目的変数）を選択してください:", 
-            ["📊 CSV内の指標（前日比やROEなど）を目的変数にする", 
-             "🚀 中長期的な「株価上昇率」を自動取得して目的変数にする"]
-        )
+        target_mode = st.radio("分析のアプローチ（目的変数）を選択してください:", ["📊 CSV内の指標（前日比やROEなど）を目的変数にする", "🚀 中長期的な「株価上昇率」を自動取得して目的変数にする"])
         st.divider()
 
         if target_mode == "📊 CSV内の指標（前日比やROEなど）を目的変数にする":
@@ -405,107 +406,105 @@ if master_df is not None:
                 if feature_cols:
                     analysis_df = latest_df[[target_col] + feature_cols].dropna()
                     if len(analysis_df) > 50:
-                        st.success(f"現在選択されている項目がすべて揃っている銘柄: {len(analysis_df)}件")
                         col1, col2 = st.columns(2)
                         with col1:
-                            fig_corr = px.imshow(analysis_df.corr(), text_auto=".2f", aspect="auto", color_continuous_scale='RdBu_r')
-                            st.plotly_chart(fig_corr, use_container_width=True)
+                            st.plotly_chart(px.imshow(analysis_df.corr(), text_auto=".2f", aspect="auto", color_continuous_scale='RdBu_r'), use_container_width=True)
                         with col2:
                             model = RandomForestRegressor(n_estimators=100, random_state=42)
                             model.fit(analysis_df[feature_cols], analysis_df[target_col])
                             importance_df = pd.DataFrame({'項目': feature_cols, '影響度': model.feature_importances_}).sort_values('影響度')
-                            fig_imp = px.bar(importance_df, x='影響度', y='項目', orientation='h', color='影響度')
-                            st.plotly_chart(fig_imp, use_container_width=True)
+                            st.plotly_chart(px.bar(importance_df, x='影響度', y='項目', orientation='h', color='影響度'), use_container_width=True)
                     else:
-                        st.warning(f"有効なデータが {len(analysis_df)} 件しかありません。空欄の多い項目を外してください。")
+                        st.warning("有効データが不足しています。")
         else:
             st.info("Yahoo Financeから各銘柄の過去の株価を取得し、「直近〇ヶ月の株価上昇率」を算出して要因分析を行います。")
             col_period, col_features = st.columns([1, 2])
             with col_period:
                 period_label = st.selectbox("上昇率の測定期間:", ["1ヶ月", "3ヶ月", "6ヶ月", "1年"])
                 period_map = {"1ヶ月": "1mo", "3ヶ月": "3mo", "6ヶ月": "6mo", "1年": "1y"}
-                period_val = period_map[period_label]
                 target_col = f"株価上昇率 ({period_label})"
             with col_features:
                 default_feats = [f for f in numeric_cols if "ROE" in f or "PER" in f or "自己資本比率" in f][:3]
                 feature_cols = st.multiselect("説明変数を選択:", numeric_cols, default=default_feats)
 
             if st.button("🚀 株価データを取得して解析開始"):
-                with st.spinner(f"全銘柄の過去{period_label}の株価を一括取得中..."):
+                with st.spinner("株価データ一括取得中..."):
                     tickers = [get_ticker_symbol(code) for code in latest_df['コード'].dropna().unique()]
                     try:
-                        data = yf.download(tickers, period=period_val, group_by="ticker", threads=False)
+                        data = yf.download(tickers, period=period_map[period_label], group_by="ticker", threads=False)
                         returns = {}
                         for ticker in tickers:
                             try:
                                 df_t = data if len(tickers) == 1 else data[ticker]
                                 df_t = df_t.dropna(subset=['Close'])
                                 if len(df_t) >= 2:
-                                    start_price = df_t['Close'].iloc[0]
-                                    end_price = df_t['Close'].iloc[-1]
-                                    returns[ticker] = (end_price - start_price) / start_price * 100
+                                    returns[ticker] = (df_t['Close'].iloc[-1] - df_t['Close'].iloc[0]) / df_t['Close'].iloc[0] * 100
                             except: pass
-                        
                         analysis_target_df = latest_df.copy()
                         analysis_target_df[target_col] = analysis_target_df['コード'].apply(lambda x: returns.get(get_ticker_symbol(x)))
                         analysis_df = analysis_target_df[[target_col] + feature_cols].dropna()
-                        
                         if len(analysis_df) > 50:
-                            st.success(f"解析に使用した有効銘柄: {len(analysis_df)}件")
                             col1, col2 = st.columns(2)
                             with col1:
-                                fig_corr = px.imshow(analysis_df.corr(), text_auto=".2f", aspect="auto", color_continuous_scale='RdBu_r')
-                                st.plotly_chart(fig_corr, use_container_width=True)
+                                st.plotly_chart(px.imshow(analysis_df.corr(), text_auto=".2f", aspect="auto", color_continuous_scale='RdBu_r'), use_container_width=True)
                             with col2:
                                 model = RandomForestRegressor(n_estimators=100, random_state=42)
                                 model.fit(analysis_df[feature_cols], analysis_df[target_col])
-                                importance_df = pd.DataFrame({'項目': feature_cols, '影響度': model.feature_importances_}).sort_values('影響度')
-                                fig_imp = px.bar(importance_df, x='影響度', y='項目', orientation='h', color='影響度')
-                                st.plotly_chart(fig_imp, use_container_width=True)
+                                st.plotly_chart(px.bar(pd.DataFrame({'項目': feature_cols, '影響度': model.feature_importances_}).sort_values('影響度'), x='影響度', y='項目', orientation='h', color='影響度'), use_container_width=True)
                         else:
-                            st.warning("有効データ不足です。空欄の多い項目を外してください。")
+                            st.warning("有効データ不足です。")
                     except Exception as e:
-                        st.error(f"エラーが発生しました: {e}")
+                        st.error(f"エラー: {e}")
 
-    # --- モード4: バックテスト ---
+    # --- モード4: 過去データでの答え合わせ ---
     elif mode == "⏱️ 過去データでの答え合わせ (バックテスト)":
-        st.subheader("過去の指標と実際のリターンの答え合わせ")
-        past_price_col = st.selectbox("「当時の株価」の列:", [c for c in numeric_cols if "値" in c or "株価" in c], index=0)
+        st.subheader("過去の特定時点の指標と、その後の株価上昇率の答え合わせ")
+        months_ago = st.slider("何ヶ月前のデータを基準にするか", min_value=1, max_value=24, value=3)
+        past_price_col = st.selectbox("「当時の株価」として使うCSV内の列:", [c for c in numeric_cols if "値" in c or "株価" in c], index=0)
         available_features = [c for c in numeric_cols if c != past_price_col]
-        feature_cols = st.multiselect("検証したい当時の指標:", available_features, default=[f for f in available_features if "ROE" in f][:1])
+        feature_cols = st.multiselect("検証したい当時の指標（説明変数）:", available_features, default=[f for f in available_features if "ROE" in f][:1])
 
-        if st.button("🚀 最新株価を取得して検証開始"):
-            with st.spinner("最新株価を取得中..."):
-                target_df = latest_df.copy()
-                tickers = [get_ticker_symbol(code) for code in target_df['コード'].dropna().unique()]
-                
+        if st.button("🚀 指定した期間でバックテストを開始"):
+            with st.spinner(f"約{months_ago}ヶ月前のデータを抽出 & 最新株価を取得中..."):
+                target_df = master_df.copy()
+                if '取得日' in target_df.columns:
+                    target_df['取得日_dt'] = pd.to_datetime(target_df['取得日'], errors='coerce')
+                    max_date = target_df['取得日_dt'].max()
+                    if pd.notna(max_date):
+                        target_past_date = max_date - timedelta(days=30 * months_ago)
+                        target_df['date_diff'] = (target_df['取得日_dt'] - target_past_date).abs()
+                        past_df = target_df.sort_values('date_diff').groupby('コード').head(1).copy()
+                    else:
+                        past_df = latest_df.copy()
+                else:
+                    past_df = latest_df.copy()
+
+                tickers = [get_ticker_symbol(code) for code in past_df['コード'].dropna().unique()]
                 try:
                     data = yf.download(tickers, period="1d", group_by="ticker", threads=False)
                     current_prices = {}
                     for ticker in tickers:
                         try:
-                            if len(tickers) == 1:
-                                current_prices[ticker] = data['Close'].iloc[-1]
-                            else:
-                                current_prices[ticker] = data[ticker]['Close'].iloc[-1]
+                            if len(tickers) == 1: current_prices[ticker] = data['Close'].iloc[-1]
+                            else: current_prices[ticker] = data[ticker]['Close'].iloc[-1]
                         except: pass
                     
-                    target_df['最新株価'] = target_df['コード'].apply(lambda x: current_prices.get(get_ticker_symbol(x)))
-                    target_df['実際の上昇率(%)'] = (target_df['最新株価'] - target_df[past_price_col]) / target_df[past_price_col] * 100
-                    analysis_df = target_df[['実際の上昇率(%)'] + feature_cols].dropna()
+                    past_df['最新株価'] = past_df['コード'].apply(lambda x: current_prices.get(get_ticker_symbol(x)))
+                    past_df['実際の上昇率(%)'] = (past_df['最新株価'] - past_df[past_price_col]) / past_df[past_price_col] * 100
+                    analysis_df = past_df[['実際の上昇率(%)'] + feature_cols].dropna()
                     
                     if len(analysis_df) > 50:
                         col1, col2 = st.columns(2)
                         with col1:
-                            st.dataframe(target_df[['コード', '銘柄名', past_price_col, '最新株価', '実際の上昇率(%)']].dropna().sort_values('実際の上昇率(%)', ascending=False).head(10))
+                            st.dataframe(past_df[['コード', '銘柄名', '取得日', past_price_col, '最新株価', '実際の上昇率(%)']].dropna().sort_values('実際の上昇率(%)', ascending=False).head(10))
                         with col2:
                             model = RandomForestRegressor(random_state=42)
                             model.fit(analysis_df[feature_cols], analysis_df['実際の上昇率(%)'])
                             st.plotly_chart(px.bar(pd.DataFrame({'項目': feature_cols, '影響度': model.feature_importances_}).sort_values('影響度'), x='影響度', y='項目', orientation='h', color='影響度'), use_container_width=True)
                     else:
-                        st.warning("有効データ不足です。空欄の多い項目を外してください。")
+                        st.warning("有効データ不足です。")
                 except Exception as e:
-                    st.error(f"エラーが発生しました: {e}")
+                    st.error(f"エラー: {e}")
 
 else:
-    st.error("⚠️ `master_database.csv` が見つかりません。アプリ (`分析ソフト.py`) と同じフォルダにファイルを配置してください。")
+    st.error("⚠️ `master_database.csv` が見つかりません。アプリと同じフォルダにファイルを配置してください。")

@@ -68,18 +68,20 @@ def load_and_clean_master_data(filepath="master_database.csv"):
     except UnicodeDecodeError:
         df = pd.read_csv(filepath, encoding="utf-8", on_bad_lines='skip')
 
+    # 前日比の特殊な処理
     if '前日比(%)' in df.columns:
         if df['前日比(%)'].dtype == 'object':
             extracted = df['前日比(%)'].astype(str).str.extract(r'\(([-+]?[0-9]*\.?[0-9]+)%\)')
             df['前日比(%) (数値)'] = pd.to_numeric(extracted[0], errors='coerce')
         else:
-            df['前日比(%) (数値)'] = df['前日比(%)']
+            df['前日比(%) (数値)'] = pd.to_numeric(df['前日比(%)'], errors='coerce')
     
+    # 🌟【修正】文字・日付情報以外の「全項目」を強制的に数値化（カンマ除去等）
+    exclude_from_numeric = ['取得日', 'コード', '銘柄名', '市場', '財務', '前日比(%)']
     for col in df.columns:
-        if df[col].dtype == 'object':
-            if col not in ['取得日', 'コード', '銘柄名', '市場', '財務', '前日比(%)']:
-                cleaned = df[col].astype(str).str.strip().str.replace(',', '', regex=True)
-                df[col] = pd.to_numeric(cleaned, errors='coerce')
+        if col not in exclude_from_numeric:
+            cleaned = df[col].astype(str).str.strip().str.replace(',', '', regex=True)
+            df[col] = pd.to_numeric(cleaned, errors='coerce')
     
     if '取得日' in df.columns:
         df['取得日'] = pd.to_datetime(df['取得日'], errors='coerce').dt.strftime('%Y-%m-%d')
@@ -100,7 +102,6 @@ def format_metric(val, suffix=""):
 # UI構築とメイン処理
 # ==========================================
 st.sidebar.header("分析モード")
-# 🌟 新しいモードを5つ目として追加
 mode = st.sidebar.radio(
     "選択してください",
     [
@@ -119,8 +120,9 @@ with st.spinner("マスターデータを自動読み込み中..."):
 if master_df is not None:
     st.sidebar.success(f"✅ マスターデータを自動読み込みしました\n(総データ数: {len(master_df)}件)")
     
+    # 🌟【修正】確実にすべての数値列をピックアップする指定に変更
     exclude_cols = ['コード', '前日比(%)']
-    numeric_cols = [c for c in master_df.select_dtypes(include=['float64', 'int64']).columns if c not in exclude_cols]
+    numeric_cols = [c for c in master_df.select_dtypes(include='number').columns if c not in exclude_cols]
     
     if '取得日' in master_df.columns:
         latest_df = master_df.sort_values('取得日').groupby('コード').tail(1)
@@ -183,15 +185,13 @@ if master_df is not None:
             stock_history_df = master_df[master_df['コード'].astype(str) == selected_code].sort_values('取得日')
             
             if len(stock_history_df) > 1 and '取得日' in stock_history_df.columns:
-                exclude_from_plot = ['取得日', 'コード', '銘柄名', '市場', '財務', '検索用ラベル', '前日比(%)', '前日比(%) (数値)', '現在値']
-                plot_cols = [c for c in master_df.columns if c not in exclude_from_plot]
+                plot_cols = numeric_cols
                 default_idx = plot_cols.index('ROE(自己資本利益率)(%)') if 'ROE(自己資本利益率)(%)' in plot_cols else 0
                 
                 selected_metric = st.selectbox("推移を確認したい指標を選択してください:", plot_cols, index=default_idx)
                 
                 if selected_metric:
                     plot_data = stock_history_df.copy()
-                    plot_data[selected_metric] = pd.to_numeric(plot_data[selected_metric].astype(str).str.replace(',', '', regex=True), errors='coerce')
                     plot_data = plot_data.dropna(subset=[selected_metric])
 
                     if len(plot_data) > 0:
@@ -293,10 +293,6 @@ if master_df is not None:
             if st.button("💾 現在の条件をデフォルトとして保存"):
                 save_settings(st.session_state['settings'])
                 st.success("条件を保存しました！")
-            
-            for col in ['ROE(自己資本利益率)(%)', 'PER(株価収益率)(倍)', 'PBR(株価純資産倍率)(倍)', '配当利回り(%)', '過去3年平均売上高成長率(予)(%)', '自己資本比率(%)']:
-                if col in latest_df.columns:
-                    latest_df[col] = pd.to_numeric(latest_df[col], errors='coerce')
 
             filtered_df = latest_df[
                 (latest_df['ROE(自己資本利益率)(%)'].fillna(0) >= current_roe) &
@@ -317,7 +313,7 @@ if master_df is not None:
                 valid_codes = []
                 for code, group in master_df.groupby('コード'):
                     g_sorted = group.sort_values('取得日')
-                    eps_series = pd.to_numeric(g_sorted[eps_col].astype(str).str.replace(',', '', regex=True), errors='coerce').dropna()
+                    eps_series = g_sorted[eps_col].dropna()
                     
                     if len(eps_series) >= 2:
                         vals = eps_series.values
@@ -505,7 +501,7 @@ if master_df is not None:
                 except Exception as e:
                     st.error(f"エラー: {e}")
 
-    # --- 🌟 モード5: 新規追加！指標の変化 × 株価上昇率 (モメンタム分析) ---
+    # --- モード5: 指標の変化 × 株価上昇率 (モメンタム分析) ---
     elif mode == "🔄 指標の変化 × 株価上昇率 (モメンタム分析)":
         st.subheader("ファンダメンタル指標の変化（改善・悪化）と株価上昇率の関係を分析")
         st.write("「EPSの変化率」や「ROEの差分」など、指標の改善度がどのくらい株価上昇に結びついているかを解析します。")
@@ -540,7 +536,6 @@ if master_df is not None:
                     past_df = latest_df.copy()
                     latest_df_for_calc = latest_df.copy()
                 
-                # 過去と最新のデータをマージ
                 merged_df = pd.merge(
                     past_df[['コード', past_price_col] + selected_base_features], 
                     latest_df_for_calc[['コード'] + selected_base_features], 
@@ -548,7 +543,6 @@ if master_df is not None:
                     suffixes=('_past', '_latest')
                 )
                 
-                # 🌟 自動判別による「変化率」または「差分」の計算
                 calc_features = []
                 for col in selected_base_features:
                     past_col = f"{col}_past"
@@ -556,10 +550,8 @@ if master_df is not None:
                     merged_df[past_col] = pd.to_numeric(merged_df[past_col], errors='coerce')
                     merged_df[latest_col] = pd.to_numeric(merged_df[latest_col], errors='coerce')
                     
-                    # EPS、売上、利益などが含まれ、かつ「(%)」が付いていない指標は「変化率」
                     if ("EPS" in col or "売上" in col or "利益" in col) and "(%)" not in col and "(倍)" not in col:
                         new_col_name = f"{col} (変化率%)"
-                        # マイナスからの成長も正しく計算するため abs() を使用、ゼロ除算回避
                         merged_df[new_col_name] = np.where(
                             merged_df[past_col] != 0, 
                             (merged_df[latest_col] - merged_df[past_col]) / merged_df[past_col].abs() * 100, 
@@ -567,12 +559,10 @@ if master_df is not None:
                         )
                         calc_features.append(new_col_name)
                     else:
-                        # ROEやPERなどの比率・倍率系は「差分（引き算）」
                         new_col_name = f"{col} (差分)"
                         merged_df[new_col_name] = merged_df[latest_col] - merged_df[past_col]
                         calc_features.append(new_col_name)
                 
-                # Yahoo Financeから最新株価を取得し、株価上昇率を計算
                 tickers = [get_ticker_symbol(code) for code in merged_df['コード'].dropna().unique()]
                 try:
                     data = yf.download(tickers, period="1d", group_by="ticker", threads=False)

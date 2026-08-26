@@ -100,13 +100,15 @@ def format_metric(val, suffix=""):
 # UI構築とメイン処理
 # ==========================================
 st.sidebar.header("分析モード")
+# 🌟 新しいモードを5つ目として追加
 mode = st.sidebar.radio(
     "選択してください",
     [
         "🔍 個別銘柄の検索・チャート分析",
         "⭐ スクリーニング ＆ お気に入り",
         "📈 現在の要因分析 (多変量解析)", 
-        "⏱️ 過去データでの答え合わせ (バックテスト)"
+        "⏱️ 過去データでの答え合わせ (バックテスト)",
+        "🔄 指標の変化 × 株価上昇率 (モメンタム分析)"
     ]
 )
 st.sidebar.markdown("---")
@@ -273,7 +275,6 @@ if master_df is not None:
             current_growth = dual_input("3年平均売上成長率の最低ライン (%)", 'scr_growth', -50.0, 50.0)
             current_equity = dual_input("自己資本比率の最低ライン (%)", 'scr_equity', 0.0, 100.0)
             
-            # 🌟 成長株チェック ＆ 判定モードの選択
             eps_growing_check = st.checkbox("📈 過去データにおいてEPSが右肩上がりに成長している銘柄を抽出する", value=st.session_state.get('scr_eps_growing', False))
             st.session_state['scr_eps_growing'] = eps_growing_check
 
@@ -309,7 +310,6 @@ if master_df is not None:
             if '自己資本比率(%)' in latest_df.columns:
                 filtered_df = filtered_df[filtered_df['自己資本比率(%)'].fillna(0) >= current_equity]
 
-            # 🌟 EPS成長の判定ロジック（選択されたモードに分岐）
             eps_col_candidates = [c for c in master_df.columns if "EPS" in c]
             eps_col = eps_col_candidates[0] if eps_col_candidates else None
 
@@ -328,7 +328,6 @@ if master_df is not None:
                             if vals[-1] > vals[0]:
                                 valid_codes.append(code)
                         elif st.session_state['scr_eps_mode'] == "例外許容モード（途中の下落は最大1回まで許容）":
-                            # 下落した回数（前回より下がったポイントの数）をカウント
                             decreases = sum(1 for i in range(1, len(vals)) if vals[i] < vals[i-1])
                             if decreases <= 1 and vals[-1] > vals[0]:
                                 valid_codes.append(code)
@@ -505,6 +504,103 @@ if master_df is not None:
                         st.warning("有効データ不足です。")
                 except Exception as e:
                     st.error(f"エラー: {e}")
+
+    # --- 🌟 モード5: 新規追加！指標の変化 × 株価上昇率 (モメンタム分析) ---
+    elif mode == "🔄 指標の変化 × 株価上昇率 (モメンタム分析)":
+        st.subheader("ファンダメンタル指標の変化（改善・悪化）と株価上昇率の関係を分析")
+        st.write("「EPSの変化率」や「ROEの差分」など、指標の改善度がどのくらい株価上昇に結びついているかを解析します。")
+        
+        months_ago = st.slider("何ヶ月前のデータと比較するか", min_value=1, max_value=24, value=3)
+        past_price_col = st.selectbox("「当時の株価」として使うCSV内の列:", [c for c in numeric_cols if "値" in c or "株価" in c], index=0)
+        
+        available_features = [c for c in numeric_cols if c != past_price_col]
+        selected_base_features = st.multiselect(
+            "変化を検証したい指標を選択:", 
+            available_features, 
+            default=[f for f in available_features if "ROE" in f or "EPS" in f or "PER" in f][:3]
+        )
+        st.info("※ 利益系（EPS等）は「変化率(%)」、比率・倍率系（ROE・PER等）は「差分（ポイント）」として自動で計算・判定されます。")
+        
+        if st.button("🚀 変化を計算して解析開始"):
+            with st.spinner(f"約{months_ago}ヶ月前のデータを抽出し、各指標の変化量を計算中..."):
+                target_df = master_df.copy()
+                if '取得日' in target_df.columns:
+                    target_df['取得日_dt'] = pd.to_datetime(target_df['取得日'], errors='coerce')
+                    max_date = target_df['取得日_dt'].max()
+                    
+                    if pd.notna(max_date):
+                        target_past_date = max_date - timedelta(days=30 * months_ago)
+                        target_df['date_diff'] = (target_df['取得日_dt'] - target_past_date).abs()
+                        past_df = target_df.sort_values('date_diff').groupby('コード').head(1).copy()
+                        latest_df_for_calc = target_df.sort_values('取得日_dt').groupby('コード').tail(1).copy()
+                    else:
+                        past_df = latest_df.copy()
+                        latest_df_for_calc = latest_df.copy()
+                else:
+                    past_df = latest_df.copy()
+                    latest_df_for_calc = latest_df.copy()
+                
+                # 過去と最新のデータをマージ
+                merged_df = pd.merge(
+                    past_df[['コード', past_price_col] + selected_base_features], 
+                    latest_df_for_calc[['コード'] + selected_base_features], 
+                    on='コード', 
+                    suffixes=('_past', '_latest')
+                )
+                
+                # 🌟 自動判別による「変化率」または「差分」の計算
+                calc_features = []
+                for col in selected_base_features:
+                    past_col = f"{col}_past"
+                    latest_col = f"{col}_latest"
+                    merged_df[past_col] = pd.to_numeric(merged_df[past_col], errors='coerce')
+                    merged_df[latest_col] = pd.to_numeric(merged_df[latest_col], errors='coerce')
+                    
+                    # EPS、売上、利益などが含まれ、かつ「(%)」が付いていない指標は「変化率」
+                    if ("EPS" in col or "売上" in col or "利益" in col) and "(%)" not in col and "(倍)" not in col:
+                        new_col_name = f"{col} (変化率%)"
+                        # マイナスからの成長も正しく計算するため abs() を使用、ゼロ除算回避
+                        merged_df[new_col_name] = np.where(
+                            merged_df[past_col] != 0, 
+                            (merged_df[latest_col] - merged_df[past_col]) / merged_df[past_col].abs() * 100, 
+                            np.nan
+                        )
+                        calc_features.append(new_col_name)
+                    else:
+                        # ROEやPERなどの比率・倍率系は「差分（引き算）」
+                        new_col_name = f"{col} (差分)"
+                        merged_df[new_col_name] = merged_df[latest_col] - merged_df[past_col]
+                        calc_features.append(new_col_name)
+                
+                # Yahoo Financeから最新株価を取得し、株価上昇率を計算
+                tickers = [get_ticker_symbol(code) for code in merged_df['コード'].dropna().unique()]
+                try:
+                    data = yf.download(tickers, period="1d", group_by="ticker", threads=False)
+                    current_prices = {}
+                    for ticker in tickers:
+                        try:
+                            if len(tickers) == 1: current_prices[ticker] = data['Close'].iloc[-1]
+                            else: current_prices[ticker] = data[ticker]['Close'].iloc[-1]
+                        except: pass
+                    
+                    merged_df['最新株価'] = merged_df['コード'].apply(lambda x: current_prices.get(get_ticker_symbol(x)))
+                    merged_df['実際の上昇率(%)'] = (merged_df['最新株価'] - merged_df[past_price_col]) / merged_df[past_price_col] * 100
+                    
+                    analysis_df = merged_df[['コード', '実際の上昇率(%)'] + calc_features].dropna()
+                    
+                    if len(analysis_df) > 50:
+                        st.success(f"有効データ数: {len(analysis_df)}件 (約{months_ago}ヶ月前からの変化)")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.plotly_chart(px.imshow(analysis_df[['実際の上昇率(%)'] + calc_features].corr(), text_auto=".2f", aspect="auto", color_continuous_scale='RdBu_r'), use_container_width=True)
+                        with col2:
+                            model = RandomForestRegressor(random_state=42)
+                            model.fit(analysis_df[calc_features], analysis_df['実際の上昇率(%)'])
+                            st.plotly_chart(px.bar(pd.DataFrame({'項目': calc_features, '影響度': model.feature_importances_}).sort_values('影響度'), x='影響度', y='項目', orientation='h', color='影響度'), use_container_width=True)
+                    else:
+                        st.warning(f"有効データが不足しています（{len(analysis_df)}件）。CSV内に指定期間の履歴データが十分にあるかご確認ください。")
+                except Exception as e:
+                    st.error(f"エラーが発生しました: {e}")
 
 else:
     st.error("⚠️ `master_database.csv` が見つかりません。アプリと同じフォルダにファイルを配置してください。")
